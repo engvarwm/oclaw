@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Env / secrets
+.env
+*.env
+openai.env
+instance/.env
+*.key
+*.pem
+
+# Logs
+*.log
+logs/
+tmp/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local data
+uploads/
+storage/
+media/
