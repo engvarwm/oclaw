@@ -1,585 +1,148 @@
-Задача: реорганизовать проект OpenClaw-адаптера Hub в модульную структуру с разделением routers, services, schemas, prompts, tests.
-
-Контекст:
-
-* Сейчас OpenClaw-адаптер находится на сервере в `/opt/hub`.
-* Основной файл сейчас: `/opt/hub/main.py`.
-* Это отдельный FastAPI-адаптер между CRM Hub и OpenClaw/OpenAI.
-* Nginx проксирует:
-
-  * внешний URL `https://engvar.ee/hub/...`
-  * во внутренний adapter `http://127.0.0.1:18089/...`
-* Уже есть рабочие endpoints:
-
-  * `GET /health`
-  * `POST /deals/draft-reply`
-  * `POST /deals/next-step`
-* Важно: внешние URL менять нельзя.
-* В будущем будут добавляться запросы по разным модулям Hub:
-
-  * Deals / Сделки
-  * Emails
-  * Calls / телефония
-  * Tasks
-  * Finance / банки
-  * Taxes
-  * Plan-Fact
-  * Repairs
-  * другие модули
-* Нужно подготовить архитектуру, чтобы новые endpoints не складывались в один огромный `main.py`.
-
-Цель:
-Сделать нормальную структуру проекта:
-
-```text
-/opt/hub
-  main.py
-  app/
-    __init__.py
-    main.py
-    core/
-      __init__.py
-      config.py
-      security.py
-      logging.py
-      errors.py
-    routers/
-      __init__.py
-      health.py
-      deals.py
-    services/
-      __init__.py
-      openclaw_client.py
-      prompt_renderer.py
-      response_parser.py
-      deals/
-        __init__.py
-        draft_reply_service.py
-        next_step_service.py
-    schemas/
-      __init__.py
-      common.py
-      deals.py
-    prompts/
-      deals/
-        draft_reply.txt
-        next_step.txt
-    tests/
-      __init__.py
-      conftest.py
-      test_health.py
-      test_deals_draft_reply.py
-      test_deals_next_step.py
-```
-
-Можно адаптировать структуру под текущий проект, но обязательно разделить:
-
-* FastAPI app;
-* routers;
-* services;
-* schemas;
-* prompt templates;
-* OpenClaw client;
-* tests.
-
-1. Совместимость
-
-Нельзя ломать существующие endpoints:
-
-```text
-GET /health
-POST /deals/draft-reply
-POST /deals/next-step
-```
-
-Они должны работать после рефакторинга точно так же.
-
-Форматы ответов сохранить:
-
-* `/health` возвращает `{"ok": true, "service": "..."}`
-* `/deals/draft-reply` возвращает:
-
-```json
-{
-  "ok": true,
-  "draft_reply": "..."
-}
-```
+Ты готовишь черновик ответа клиенту для CRM Hub, модуль «Сделки».
+
+Твоя задача:
+Написать деловой черновик письма клиенту с учётом:
+
+* входящего письма клиента;
+* типа сценария сделки;
+* стадии сделки;
+* суммы сделки;
+* текущего шага плана касаний;
+* предыдущей истории общения;
+* уже отправленных КП / документов;
+* недостающих данных для следующего шага.
+
+Важно:
+Письмо НЕ отправляется автоматически. Это только черновик для менеджера.
+
+Контекст сделки:
+
+Тип сценария сделки:
+{deal_scenario}
+
+Возможные значения:
 
-* `/deals/next-step` возвращает:
+* fast — быстрая сделка до 500 000 ₽. Нужно быстрее квалифицировать запрос, получить недостающие данные, отправить КП или довести до решения. Не предлагай лишние встречи без необходимости.
+* standard — стандартная сделка 500 001–1 000 000 ₽. Нужно уточнить ТЗ, сроки, бюджет, участников согласования, затем вести к КП, корректировке или договору.
+* strategic — стратегическая сделка выше 1 000 000 ₽. Нужно учитывать ЛПР, технического специалиста, бюджет, тендерность, процесс согласования, встречи, корректировки КП и договор.
 
-```json
-{
-  "ok": true,
-  "recommendation": {...}
-}
-```
+Стадия сделки:
+{deal_stage}
 
-2. main.py
+Текущий статус / этап:
+{deal_status}
 
-Существующий `/opt/hub/main.py` сделать минимальным compatibility entrypoint:
+Сумма сделки / КП:
+{deal_amount}
 
-```python
-from app.main import app
-```
+Текущий шаг плана касаний:
+{current_touch_step}
 
-Вся логика должна переехать в `app/main.py`, routers и services.
+История последних событий:
+{recent_timeline}
 
-3. app/main.py
+Последние письма / сообщения:
+{recent_messages}
 
-Создать FastAPI app:
+Данные отправителя:
+{sender_profile}
 
-* подключить routers:
+Вложения письма:
+{attachments_summary}
 
-  * health router;
-  * deals router;
-* настроить exception handlers;
-* настроить logging;
-* не хранить бизнес-логику в `app/main.py`.
+Входящее письмо клиента:
 
-Пример:
+Тема:
+{subject}
 
-```python
-from fastapi import FastAPI
-from app.routers import health, deals
+Текст:
+{body}
 
-app = FastAPI(title="Hub OpenClaw Adapter")
+Правила анализа перед написанием:
 
-app.include_router(health.router)
-app.include_router(deals.router, prefix="/deals")
-```
+1. Сначала определи, на каком этапе находится сделка.
+2. Определи, какой сценарий используется: fast, standard или strategic.
+3. Определи намерение клиента:
 
-4. Config
+   * первичный запрос;
+   * запрос КП;
+   * уточнение по КП;
+   * вопрос по срокам;
+   * вопрос по стоимости;
+   * возражение;
+   * согласование;
+   * запрос документов;
+   * ответ после молчания;
+   * отказ;
+   * другое.
+4. Определи, достаточно ли данных для следующего шага.
+5. Если данных не хватает, письмо должно аккуратно запросить только нужные уточнения.
+6. Если клиент уже получил КП, не пиши так, будто КП ещё не отправлено.
+7. Если сделка strategic, обязательно учитывай ЛПР, техническое согласование, бюджет, тендерность и процесс принятия решения, но не перегружай письмо.
+8. Если сделка fast, письмо должно быть коротким и вести к быстрому решению.
+9. Если сделка standard, письмо должно помогать продвинуть квалификацию, КП или согласование.
 
-Создать `app/core/config.py`.
+Жёсткие ограничения:
 
-Вынести туда:
+* Верни только текст письма.
+* Не используй markdown.
+* Не добавляй JSON.
+* Не добавляй пояснения для менеджера.
+* Не выдумывай цены, сроки, скидки, наличие товара, условия договора или технические параметры.
+* Не обещай выполнение работ, если этого нет в контексте.
+* Не утверждай, что КП/документы отправлены, если этого нет в истории.
+* Не проси данные, которые уже есть в контексте.
+* Не повторяй всю историю сделки клиенту.
+* Не используй канцелярит и длинные тяжёлые фразы.
+* Пиши на языке входящего письма.
+* Тон: деловой, спокойный, уверенный, полезный.
 
-* `HUB_OPENCLAW_TOKEN`
-* `OPENCLAW_BIN`
-* timeout
-* session keys
-* любые future env.
+Что должно быть в письме:
 
-Пример:
+* Приветствие.
+* Краткая реакция на запрос клиента.
+* Следующий логичный шаг с учётом сценария и стадии.
+* Если нужны уточнения — список коротких вопросов в тексте письма.
+* Если уместно — предложение звонка, встречи, технического обсуждения или корректировки КП.
+* Завершение без давления.
 
-```python
-from pydantic import BaseModel
-import os
+Особые правила по сценариям:
 
-class Settings(BaseModel):
-    hub_openclaw_token: str = os.getenv("HUB_OPENCLAW_TOKEN", "")
-    openclaw_bin: str = os.getenv("OPENCLAW_BIN", "openclaw")
-    openclaw_timeout_seconds: int = int(os.getenv("OPENCLAW_TIMEOUT_SECONDS", "180"))
+Если deal_scenario = fast:
 
-settings = Settings()
-```
+* Пиши кратко.
+* Быстро веди к уточнению недостающих данных или решению.
+* Не предлагай сложные встречи, если можно решить письмом или коротким звонком.
+* Подчеркни готовность оперативно подготовить/скорректировать КП, если это уместно.
 
-Не печатать secrets в логах.
+Если deal_scenario = standard:
 
-5. Security
+* Уточняй ТЗ, сроки, бюджет, ответственных за согласование.
+* Если КП уже отправлено, спрашивай, удалось ли изучить, есть ли вопросы или нужна корректировка.
+* Предлагай короткий звонок, если вопросов много или нужно согласовать детали.
 
-Создать `app/core/security.py`.
+Если deal_scenario = strategic:
 
-Вынести проверку Bearer token:
+* Учитывай, что сделка крупная и требует процесса.
+* Уточняй ЛПР, техническое контактное лицо, тендер/закупочный регламент, бюджет, сроки и этап согласования.
+* Предлагай технический звонок или встречу, если без этого нельзя продвинуть сделку.
+* Не дави на быстрое решение, если сделка явно требует согласования.
 
-```python
-def verify_hub_token(authorization: str | None) -> None:
-    ...
-```
+Если стадия сделки указывает, что КП уже отправлено:
 
-Требования:
+* Не предлагай “подготовить КП” как первый шаг.
+* Спроси, получили ли КП, кто его изучает, есть ли замечания, нужна ли корректировка.
+* Следующий шаг: уточнение статуса, ответы на вопросы, технический звонок, корректировка КП или переход к договору.
 
-* если токен не настроен — 500;
-* если authorization отсутствует — 401;
-* если Bearer token неверный — 401;
-* не логировать токен.
+Если стадия сделки указывает, что идёт квалификация:
 
-Все protected routes должны использовать эту функцию.
+* Собери недостающие вводные.
+* Не обещай финальное КП без достаточных данных.
 
-6. OpenClaw client
+Если стадия сделки указывает на договор / согласование:
 
-Создать `app/services/openclaw_client.py`.
+* Пиши про документы, замечания, согласование условий и следующий шаг к подписанию.
+* Не возвращайся к первичной квалификации, если она уже пройдена.
 
-Вынести запуск OpenClaw CLI:
-
-```python
-def run_openclaw_agent(
-    *,
-    session_key: str,
-    prompt: str,
-    timeout: int | None = None,
-) -> dict:
-    ...
-```
-
-Внутри:
-
-* использовать `subprocess.run`;
-* запускать:
-
-```bash
-openclaw agent --session-key ... --message ... --json --timeout ...
-```
-
-* возвращать parsed JSON;
-* если OpenClaw вернул ошибку — бросать понятное исключение;
-* если JSON не разобрался — бросать понятное исключение;
-* логировать только краткую ошибку, без полного prompt и без secrets.
-
-7. Response parser
-
-Создать `app/services/response_parser.py`.
-
-Вынести извлечение текста из ответа OpenClaw:
-
-```python
-def extract_assistant_text(result: dict) -> str:
-    ...
-```
-
-Поддержать текущие форматы:
-
-* `result.payloads[0].text`
-* `result.finalAssistantVisibleText`
-* `result.finalAssistantRawText`
-* top-level text fields, если уже использовались.
-
-Добавить helper:
-
-```python
-def strip_json_fences(text: str) -> str:
-    ...
-```
-
-8. Prompt renderer
-
-Создать `app/services/prompt_renderer.py`.
-
-Функция:
-
-```python
-def render_prompt(template_path: str, context: dict) -> str:
-    ...
-```
-
-Требования:
-
-* templates лежат в `app/prompts/...`;
-* безопасно подставлять значения;
-* если ключ отсутствует — использовать пустую строку или `unknown`;
-* не падать из-за отсутствия необязательного поля.
-
-Можно использовать простой `.format_map(SafeDict(...))`.
-
-9. Deals router
-
-Создать `app/routers/deals.py`.
-
-Routes:
-
-* `POST /draft-reply`
-* `POST /next-step`
-
-В router:
-
-* только получение request;
-* проверка token;
-* вызов service;
-* возврат response;
-* минимум бизнес-логики.
-
-10. Deals schemas
-
-Создать `app/schemas/deals.py`.
-
-Добавить Pydantic-модели:
-
-```python
-class DealsDraftReplyRequest(BaseModel):
-    subject: str | None = None
-    body: str | None = None
-    deal_scenario: str | None = None
-    deal_stage: str | None = None
-    deal_status: str | None = None
-    deal_amount: Any | None = None
-    current_touch_step: Any | None = None
-    recent_timeline: Any | None = None
-    recent_messages: Any | None = None
-    sender_profile: Any | None = None
-    attachments_summary: Any | None = None
-```
-
-Не делать слишком жёсткую схему, потому что Hub может присылать расширенный context.
-
-Для next-step:
-
-```python
-class DealsNextStepRequest(BaseModel):
-    deal: dict | None = None
-    current_step: dict | None = None
-    timeline: list | None = None
-    messages: list | None = None
-```
-
-Можно разрешить extra fields.
-
-11. Deals draft reply service
-
-Создать:
-
-```text
-app/services/deals/draft_reply_service.py
-```
-
-Функция:
-
-```python
-def create_draft_reply(payload: dict) -> str:
-    ...
-```
-
-Логика:
-
-* нормализовать context;
-* загрузить prompt template `app/prompts/deals/draft_reply.txt`;
-* вызвать `run_openclaw_agent`;
-* извлечь текст;
-* вернуть только текст письма.
-
-12. Deals next step service
-
-Создать:
-
-```text
-app/services/deals/next_step_service.py
-```
-
-Функция:
-
-```python
-def create_next_step_recommendation(payload: dict) -> dict:
-    ...
-```
-
-Логика:
-
-* загрузить prompt template `app/prompts/deals/next_step.txt`;
-* вызвать OpenClaw;
-* извлечь текст;
-* убрать markdown fences;
-* распарсить JSON;
-* вернуть dict с `recommendation`;
-* если модель вернула плоский JSON — обернуть в `{"recommendation": ...}`;
-* сохранить текущий формат ответа.
-
-13. Prompt templates
-
-Вынести prompt из Python-кода в файлы:
-
-```text
-app/prompts/deals/draft_reply.txt
-app/prompts/deals/next_step.txt
-```
-
-В Python не хранить большие prompt-строки.
-
-В `draft_reply.txt` использовать новый prompt, который учитывает:
-
-* deal_scenario;
-* deal_stage;
-* deal_status;
-* deal_amount;
-* current_touch_step;
-* recent_timeline;
-* recent_messages;
-* sender_profile;
-* attachments_summary;
-* subject;
-* body.
-
-В `next_step.txt` использовать текущий prompt для AI Next Step Advisor.
-
-14. Common schemas/errors
-
-Создать `app/schemas/common.py`:
-
-```python
-class OkResponse(BaseModel):
-    ok: bool = True
-```
-
-Создать `app/core/errors.py`:
-
-* `OpenClawAdapterError`
-* `OpenClawUnavailableError`
-* `BadOpenClawResponseError`
-* `UnauthorizedError`, если нужно.
-
-FastAPI exception handlers должны возвращать понятный JSON:
-
-```json
-{
-  "ok": false,
-  "error": "openclaw_unavailable",
-  "message": "..."
-}
-```
-
-Но для существующих успешных ответов формат не менять.
-
-15. Tests
-
-Добавить pytest tests.
-
-Минимум:
-
-```text
-tests/test_health.py
-tests/test_deals_draft_reply.py
-tests/test_deals_next_step.py
-```
-
-Тесты не должны реально вызывать OpenClaw CLI.
-
-Использовать monkeypatch:
-
-* подменять `run_openclaw_agent`;
-* проверять, что endpoint возвращает правильный JSON;
-* проверять auth:
-
-  * без token → 401;
-  * неверный token → 401;
-  * верный token → 200.
-* проверять, что draft reply возвращает только текст.
-* проверять, что next-step корректно парсит JSON.
-
-Команда:
-
-```bash
-pytest
-```
-
-Если pytest не установлен — добавить в requirements/dev или описать.
-
-16. Проверка после рефакторинга
-
-Выполнить:
-
-```bash
-python -m compileall app main.py
-```
-
-Запустить локально:
-
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 18089
-```
-
-Проверить:
-
-```bash
-curl -i http://127.0.0.1:18089/health
-```
-
-После systemd:
-
-```bash
-sudo systemctl restart hub-openclaw-adapter
-sudo systemctl status hub-openclaw-adapter --no-pager
-```
-
-Проверить внешне:
-
-```bash
-curl -i https://engvar.ee/hub/health
-```
-
-17. systemd
-
-Проверить service:
-
-```text
-ExecStart=/opt/hub/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 18089
-```
-
-Так как `/opt/hub/main.py` остаётся compatibility entrypoint, service можно не менять.
-
-Если решишь менять service на:
-
-```text
-ExecStart=/opt/hub/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18089
-```
-
-то обязательно указать это отдельно и проверить restart.
-
-Предпочтительно пока НЕ менять systemd, чтобы снизить риск.
-
-18. Future modules
-
-Заложить шаблон для будущих модулей:
-
-```text
-app/routers/calls.py
-app/services/calls/...
-app/schemas/calls.py
-app/prompts/calls/...
-```
-
-Но не создавать пустые файлы пачками без необходимости.
-
-Добавить короткий README:
-
-```text
-README.md
-```
-
-Описать:
-
-* структура проекта;
-* как добавить новый endpoint;
-* где лежат prompts;
-* как запускать tests;
-* как проверять health;
-* какие env нужны.
-
-19. Нельзя
-
-* Не менять внешние endpoints.
-* Не менять nginx.
-* Не ломать `/health`.
-* Не ломать `/deals/draft-reply`.
-* Не ломать `/deals/next-step`.
-* Не логировать токены.
-* Не логировать полный prompt.
-* Не вызывать OpenClaw в тестах.
-* Не удалять старую рабочую логику без переноса.
-* Не делать огромный абстрактный framework ради двух endpoints.
-
-20. Acceptance criteria
-
-21. `/opt/hub/main.py` стал коротким entrypoint.
-
-22. FastAPI app находится в `app/main.py`.
-
-23. Routes разделены по `app/routers`.
-
-24. Бизнес-логика вынесена в `app/services`.
-
-25. Prompt templates вынесены в `app/prompts`.
-
-26. Schemas вынесены в `app/schemas`.
-
-27. Проверка Bearer token вынесена в `app/core/security.py`.
-
-28. OpenClaw CLI вызов вынесен в `app/services/openclaw_client.py`.
-
-29. Старые endpoints работают без изменения URL.
-
-30. Есть тесты для health, draft-reply, next-step.
-
-31. `python -m compileall app main.py` проходит.
-
-32. `pytest` проходит или добавлена понятная инструкция, почему pytest пока не запущен.
-
-33. `curl https://engvar.ee/hub/health` возвращает OK после restart.
+Формат ответа:
+Верни только готовый текст письма клиенту.
